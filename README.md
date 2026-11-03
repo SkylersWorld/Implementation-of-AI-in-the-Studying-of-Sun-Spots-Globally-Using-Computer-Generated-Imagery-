@@ -1,0 +1,1 @@
+# Implementation-of-AI-in-the-Studying-of-Sun-Spots-Globally-Using-Computer-Generated-Imagery-
