@@ -158,7 +158,7 @@ def comparison_tab():
         st.markdown(f"**The Sun on {day:%d %B %Y} — AI count on the real SDO/HMI image**")
         img = get_image(day.isoformat()) if sun and sun.get("status") == "done" else None
         if img:
-            ci, cm = st.columns([2, 1])
+            ci, cm, _ = st.columns([3, 2, 2])
             ci.image(img, width="stretch")
             cm.metric("AI groups g", sun["groups"])
             cm.metric("AI spots s", sun["spots"])
