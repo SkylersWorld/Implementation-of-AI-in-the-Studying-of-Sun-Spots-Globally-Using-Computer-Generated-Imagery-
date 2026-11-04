@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: solar
+      POSTGRES_PASSWORD: solar
+      POSTGRES_DB: solar
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U solar"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg2://solar:solar@db:5432/solar
+      SCHEDULER_ENABLED: "false"
+    volumes:
+      - ./data:/app/data
+      - ./backend/model:/app/backend/model
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  scheduler:
+    build: .
+    command: python -m backend.ingestion.scheduler
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg2://solar:solar@db:5432/solar
+    volumes:
+      - ./data:/app/data
+      - ./backend/model:/app/backend/model
+    depends_on:
+      db:
+        condition: service_healthy
+
+  dashboard:
+    build: .
+    command: streamlit run frontend/dashboard.py --server.port 8501 --server.address 0.0.0.0
+    environment:
+      API_BASE_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
