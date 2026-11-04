@@ -40,7 +40,8 @@ class Settings(BaseSettings):
     seeing_coeff_b: float = 0.8
     seeing_sigma_per_arcsec: float = 0.04
     silso_enabled: bool = True
-    silso_url: str = "https://www.sidc.be/SILSO/INFO/sndtotcsv.php"
+    silso_url: str = "https://www.sidc.be/SILSO/DATA/SN_d_tot_V2.0.csv"
+    swpc_url: str = "https://services.swpc.noaa.gov/json/solar-cycle/swpc_observed_ssn.json"
     mae_window: int = 30
 
     # Alerts

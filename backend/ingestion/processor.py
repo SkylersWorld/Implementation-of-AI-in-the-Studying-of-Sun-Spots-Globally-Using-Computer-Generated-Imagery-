@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from backend.alerts.rules import Snapshot, check_and_alert
 from backend.calibration import calibrate
-from backend.calibration.silso import fetch_silso_daily, rolling_mae
+from backend.calibration.reference import get_reference
+from backend.calibration.silso import rolling_mae
 from backend.config import get_settings
 from backend.database import Observation, SessionLocal
 from backend.ingestion.loader import FITS_EXTS, LoadedImage, load_image
@@ -53,7 +54,7 @@ def process_image(
 
     mae = None
     if s.silso_enabled:
-        reference = fetch_silso_daily()
+        reference = {d: v for d, (v, _) in get_reference(db).items()}
         if reference:
             mae = rolling_mae(hist_pairs + [(timestamp, cal.r_corrected)], reference)
 

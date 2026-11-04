@@ -8,6 +8,7 @@ venv/
 data/*
 !data/hot_folder/
 !data/cgi/
+!data/samples/
 data/hot_folder/*
 data/cgi/*
 !data/**/.gitkeep

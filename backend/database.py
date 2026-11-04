@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, create_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, create_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from backend.config import get_settings
 
@@ -37,6 +37,52 @@ class Observation(Base):
 
     seeing_arcsec: Mapped[float | None] = mapped_column(Float, nullable=True)
     interpolated: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Station(Base):
+    """A ground observing station (e.g. TSU Observatory, Tbilisi, Georgia)."""
+
+    __tablename__ = "stations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    country: Mapped[str] = mapped_column(String(64), index=True)
+    city: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    k_factor: Mapped[float] = mapped_column(Float, default=1.0)
+
+    counts: Mapped[list["DailyCount"]] = relationship(back_populates="station", cascade="all, delete-orphan")
+
+
+class DailyCount(Base):
+    """One day's visual sunspot count at a station: groups g, spots s, observer coefficient k."""
+
+    __tablename__ = "daily_counts"
+    __table_args__ = (UniqueConstraint("station_id", "date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    station_id: Mapped[int] = mapped_column(ForeignKey("stations.id", ondelete="CASCADE"), index=True)
+    date: Mapped[date] = mapped_column(Date, index=True)
+    groups: Mapped[int] = mapped_column(Integer)
+    spots: Mapped[int] = mapped_column(Integer)
+    k: Mapped[float | None] = mapped_column(Float, nullable=True)
+    seeing_arcsec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notes: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    station: Mapped[Station] = relationship(back_populates="counts")
+
+
+class ReferenceSN(Base):
+    """International daily sunspot number for one date from one source (manual / silso / swpc)."""
+
+    __tablename__ = "reference_sn"
+    __table_args__ = (UniqueConstraint("date", "source"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[date] = mapped_column(Date, index=True)
+    source: Mapped[str] = mapped_column(String(16))
+    value: Mapped[float] = mapped_column(Float)
 
 
 def _make_engine(url: str):

@@ -9,7 +9,11 @@ $$R = k\,(10g + s), \qquad k = 1.146$$
 (where *g* = groups, *s* = individual spots), attaches seeing-aware uncertainty, falls back to
 cubic-spline interpolation when an observation is unreliable, raises Slack/SMS alerts for
 δ-class regions and rapid growth, and visualises everything in a live Streamlit dashboard
-benchmarked against SILSO.
+benchmarked against the international sunspot number (SILSO, with NOAA SWPC as fallback).
+
+It also compares **ground stations by country** (e.g. TSU Observatory, Tbilisi, Georgia) with
+the international R: raw, locally scaled and least-squares-calibrated Wolf numbers, % differences,
+MAE, and linear/cubic interpolation of missing days.
 
 ## Architecture
 
@@ -37,13 +41,15 @@ flowchart LR
     subgraph Calibration["backend/calibration"]
         SIG[σ estimate<br/>counting + model + seeing]
         SPL[Cubic-spline fallback<br/>if σ > threshold]
-        SILSO[SILSO daily SN<br/>rolling MAE]
+        SILSO[International R<br/>manual › SILSO › NOAA SWPC<br/>cached · rolling MAE]
+        LOCAL[Station calibration<br/>k_fit · % diff · interpolation]
     end
 
     PROC --> UNET
     SEE --> SIG
     COUNT --> SIG --> SPL --> DB[(SQLAlchemy<br/>Observation)]
     SILSO --> DB
+    OBS[Station daily counts<br/>form / CSV] --> LOCAL --> DB
     DB --> ALERT[backend/alerts<br/>δ-class · dR/dt → Slack / Twilio]
     DB --> API[FastAPI<br/>backend/main.py]
     API --> DASH[Streamlit dashboard<br/>light curve · CME light · MAE]
@@ -68,8 +74,8 @@ flowchart LR
    term, and a seeing term (from the scintillation sensor) into σ. If `σ > SIGMA_THRESHOLD`, R is
    replaced by a natural cubic-spline estimate from recent history and the row is flagged
    `interpolated=true`.
-5. **Validation** – a rolling MAE of daily-mean R vs. the SILSO daily total sunspot number is
-   stored with each observation.
+5. **Validation** – a rolling MAE of daily-mean R vs. the international daily sunspot number is
+   stored with each observation (see *International R* below).
 6. **Alerts** – `backend/alerts/` posts to a Slack incoming webhook and/or Twilio SMS when a
    δ-class region appears or `|dR/dt| ≥ DRDT_THRESHOLD` per hour. The CME traffic light is
    green (quiet), amber (δ *or* fast dR/dt), red (both).
@@ -82,7 +88,9 @@ flowchart LR
 backend/
 ├── main.py              FastAPI app & routes
 ├── config.py            pydantic-settings (env / .env)
-├── database.py          SQLAlchemy engine + Observation model
+├── database.py          SQLAlchemy engine; Observation, Station, DailyCount, ReferenceSN
+├── stations.py          station / daily count / comparison / reference routes
+├── seed.py              load the TSU Tbilisi sample (data/samples/)
 ├── schemas.py           Pydantic request/response models
 ├── ingestion/
 │   ├── hmi_fetcher.py   SunPy Fido SDO/HMI download → hot folder
@@ -98,7 +106,9 @@ backend/
 ├── calibration/
 │   ├── seeing.py        scintillation seeing sensor & σ model
 │   ├── interpolation.py cubic-spline fallback
-│   └── silso.py         SILSO reference & rolling MAE
+│   ├── silso.py         SILSO CSV parser & rolling MAE
+│   ├── reference.py     manual › SILSO › NOAA SWPC, cached in reference_sn
+│   └── local.py         station calibration: W, k_fit, % diff, interpolation
 ├── alerts/
 │   ├── notifier.py      Slack webhook / Twilio SMS
 │   └── rules.py         δ-class & dR/dt rules, CME risk
@@ -121,6 +131,7 @@ cp .env.example .env            # edit alert credentials, thresholds, etc.
 uvicorn backend.main:app --reload                 # API on :8000 (docs at /docs)
 streamlit run frontend/dashboard.py               # dashboard on :8501
 python -m backend.ingestion.scheduler             # hourly HMI ingest (or SCHEDULER_ENABLED=true)
+python -m backend.seed                            # optional: TSU Tbilisi sample station
 ```
 
 ### Docker
@@ -177,8 +188,49 @@ Interactive docs: `http://localhost:8000/docs`.
 | POST | `/ingest/run` | Trigger the hourly HMI fetch + process job now (async, 202) |
 | POST | `/calibration/seeing` | `{"samples": [..]}` photometer intensities → scintillation index, seeing (″), Fried r₀ (cm) |
 | GET | `/metrics` | `count`, `latest_r`, `rolling_mae`, `drdt_per_hour`, `cme_risk` (`green`/`amber`/`red`) |
-| GET | `/metrics/silso?days=90` | SILSO daily reference series |
+| GET | `/metrics/silso?days=90` | International daily R (best available source) with `source` per day |
 | POST | `/hardware/sync` | `{"ra_deg", "dec_deg"}` or empty body to sync the mount to the Sun; 502 if unreachable |
+
+### Stations & international comparison
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/countries` | Countries that have a station |
+| GET / POST | `/stations[?country=]` | List / create stations (`name`, `country`, `city`, `latitude`, `longitude`, `k_factor`) |
+| GET / PATCH / DELETE | `/stations/{id}` | Single station |
+| GET / POST | `/stations/{id}/counts` | List / upsert a daily count `{date, groups, spots, k?, seeing_arcsec?, notes?, international_r?}` |
+| DELETE | `/stations/{id}/counts/{date}` | Remove a day |
+| POST | `/stations/{id}/counts/import` | Multipart CSV `date,g,s[,k,ri,seeing,notes]` (dates `YYYY-MM-DD` or `DD.MM.YY`) |
+| GET | `/stations/{id}/compare?start=&end=&source=auto&interpolation=linear` | Daily rows + summary (see below) |
+| GET | `/reference?start=&end=&source=auto` | International R with source per day |
+| PUT / DELETE | `/reference/{date}` | Set / remove a manual international value `{value}` |
+| POST | `/reference/refresh` | Re-download SILSO and NOAA now |
+
+For each day the comparison returns
+
+- `wolf_raw` W = 10g + s
+- `r_local` = k·W with the observer's k (or the station's default `k_factor`)
+- `r_calibrated` = k_fit·W, where k_fit = Σ(W·R_intl) / Σ(W²) is the least-squares fit over every
+  observed day with an international value
+- `r_international` and `reference_source` (`manual`, `silso` or `swpc`)
+- `pct_diff_local`, `pct_diff_calibrated` = (R − R_intl) / R_intl × 100
+
+Days between two observations are filled with `R_d = R_a + (d − a)/(b − a)·(R_b − R_a)`
+(`interpolation=linear`) or a natural cubic spline, and are returned with `observed=false`.
+The summary has k_fit ± σ, the mean and population σ of local R, MAE/RMSE and the mean % difference
+(local and calibrated), computed over observed days only.
+
+**International R.** Each date resolves as *manual value › SILSO › NOAA SWPC*. SILSO
+(`SN_d_tot_V2.0.csv`) and NOAA (`swpc_observed_ssn.json`) are downloaded at most every 6 h and stored
+in the `reference_sn` table, so comparisons and MAE keep working when either site is unreachable.
+Values you enter yourself (form, CSV `ri` column, or `PUT /reference/{date}`) always win.
+
+**Sample data.** `python -m backend.seed` creates *TSU Observatory (Tbilisi, Georgia)* with the nine
+Aug–Sep 2026 days from the TSU internship report and their `Ri` values as manual references. It
+reproduces the report: mean local R 83.14, σ 38.16, and 22.08 interpolated to 67.33.
+
+**dR/dt** is how fast R changes, in R per hour: (R_now − R_prev) / Δt. Above `DRDT_THRESHOLD`
+(default 20/h) it triggers an alert and the amber/red traffic light.
 
 ### Observation schema
 
