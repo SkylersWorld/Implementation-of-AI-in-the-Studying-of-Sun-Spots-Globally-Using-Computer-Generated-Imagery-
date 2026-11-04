@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+*.egg-info/
+data/*
+!data/hot_folder/
+!data/cgi/
+data/hot_folder/*
+data/cgi/*
+!data/**/.gitkeep
+*.pt
+*.history.json
