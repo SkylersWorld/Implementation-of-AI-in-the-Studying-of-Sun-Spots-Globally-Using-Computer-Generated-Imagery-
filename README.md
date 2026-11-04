@@ -11,9 +11,11 @@ cubic-spline interpolation when an observation is unreliable, raises Slack/SMS a
 δ-class regions and rapid growth, and visualises everything in a live Streamlit dashboard
 benchmarked against the international sunspot number (SILSO, with NOAA SWPC as fallback).
 
-It also compares **ground stations by country** (e.g. TSU Observatory, Tbilisi, Georgia) with
-the international R: raw, locally scaled and least-squares-calibrated Wolf numbers, % differences,
-MAE, and linear/cubic interpolation of missing days.
+It also compares **your own observatory's daily counts** (by country) with the international R.
+For every day you submit, the AI downloads the real SDO/HMI image of the Sun, counts g and s on it
+(annotated image in the dashboard), and your counts are calibrated against the AI's. The dashboard
+shows raw, local, calibrated, AI and international R, % differences, MAE, and linear/cubic
+interpolation of missing days.
 
 ## Architecture
 
@@ -90,11 +92,11 @@ backend/
 ├── config.py            pydantic-settings (env / .env)
 ├── database.py          SQLAlchemy engine; Observation, Station, DailyCount, ReferenceSN
 ├── stations.py          station / daily count / comparison / reference routes
-├── seed.py              load the TSU Tbilisi sample (data/samples/)
 ├── schemas.py           Pydantic request/response models
 ├── ingestion/
 │   ├── hmi_fetcher.py   SunPy Fido SDO/HMI download → hot folder
 │   ├── loader.py        FITS (SunPy/Astropy) / PNG / NPY loading
+│   ├── daily.py         per-day HMI fetch (Fido → Helioviewer) + AI g/s count + annotated PNG
 │   ├── processor.py     image → inference → calibration → DB → alerts
 │   └── scheduler.py     APScheduler hourly cron
 ├── model/
@@ -131,7 +133,6 @@ cp .env.example .env            # edit alert credentials, thresholds, etc.
 uvicorn backend.main:app --reload                 # API on :8000 (docs at /docs)
 streamlit run frontend/dashboard.py               # dashboard on :8501
 python -m backend.ingestion.scheduler             # hourly HMI ingest (or SCHEDULER_ENABLED=true)
-python -m backend.seed                            # optional: TSU Tbilisi sample station
 ```
 
 ### Docker
@@ -205,15 +206,19 @@ Interactive docs: `http://localhost:8000/docs`.
 | GET | `/reference?start=&end=&source=auto` | International R with source per day |
 | PUT / DELETE | `/reference/{date}` | Set / remove a manual international value `{value}` |
 | POST | `/reference/refresh` | Re-download SILSO and NOAA now |
+| GET | `/solar-days?start=&end=` | AI counts of the real HMI image per date (`status`, `groups`, `spots`, `r_ai`, `source`) |
+| GET | `/solar-days/{date}` / `/solar-days/{date}/image` | One day's AI count / annotated PNG |
+| POST | `/solar-days/{date}/analyze?longitude=` | (Re)analyse a day in the background (202) |
 
 For each day the comparison returns
 
 - `wolf_raw` W = 10g + s
 - `r_local` = k·W with the observer's k (or the station's default `k_factor`)
-- `r_calibrated` = k_fit·W, where k_fit = Σ(W·R_intl) / Σ(W²) is the least-squares fit over every
-  observed day with an international value
+- `r_ai`, `ai_groups`, `ai_spots`: the AI's count on the real SDO/HMI image of that day
+- `r_calibrated` = k_fit·W, where k_fit = Σ(W·R_AI) / Σ(W²) is the least-squares fit over every
+  observed day with an AI count (international R is used only if no day has been analysed)
 - `r_international` and `reference_source` (`manual`, `silso` or `swpc`)
-- `pct_diff_local`, `pct_diff_calibrated` = (R − R_intl) / R_intl × 100
+- `pct_diff_local`, `pct_diff_calibrated`, `pct_diff_ai` = (R − R_intl) / R_intl × 100
 
 Days between two observations are filled with `R_d = R_a + (d − a)/(b − a)·(R_b − R_a)`
 (`interpolation=linear`) or a natural cubic spline, and are returned with `observed=false`.
@@ -225,9 +230,15 @@ The summary has k_fit ± σ, the mean and population σ of local R, MAE/RMSE and
 in the `reference_sn` table, so comparisons and MAE keep working when either site is unreachable.
 Values you enter yourself (form, CSV `ri` column, or `PUT /reference/{date}`) always win.
 
-**Sample data.** `python -m backend.seed` creates *TSU Observatory (Tbilisi, Georgia)* with the nine
-Aug–Sep 2026 days from the TSU internship report and their `Ri` values as manual references. It
-reproduces the report: mean local R 83.14, σ 38.16, and 22.08 interpolated to 67.33.
+**AI count of the real Sun.** Submitting a count (form, CSV or `POST /stations/{id}/counts`) queues
+`backend/ingestion/daily.py` for that date: it downloads the HMI continuum image nearest the
+station's local solar noon (12:00 UTC − longitude/15) as a FITS file via SunPy Fido, falling back to the
+Helioviewer API, then counts sunspots on a 2048² limb-darkening-corrected image. Spots are umbrae
+(intensity < 0.65 of the local disk background) inside penumbral regions (< 0.9); a pore with no umbra
+counts once. Spots within a merge radius form a group. If `backend/model/weights.pt` exists, the U-Net
+mask is used instead. On 8 days in Aug–Sep 2026 the classical counter's W = 10g + s was within about
+15 R (MAE) of NOAA's daily number, and lower on average, because it misses small pores. Each date is
+analysed once and shared by all stations. Set `DAILY_AUTO_ANALYZE=false` to switch this off.
 
 **dR/dt** is how fast R changes, in R per hour: (R_now − R_prev) / Δt. Above `DRDT_THRESHOLD`
 (default 20/h) it triggers an alert and the amber/red traffic light.

@@ -6,19 +6,23 @@ import io
 from dataclasses import asdict
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.calibration import reference as ref
-from backend.calibration.local import INTERPOLATION_METHODS, Count, compare
-from backend.database import DailyCount, Station, get_db
+from backend.calibration.local import INTERPOLATION_METHODS, AICount, Count, compare
+from backend.config import get_settings
+from backend.database import DailyCount, SolarDay, Station, get_db
+from backend.ingestion.daily import process_days
 from backend.schemas import (
     ComparisonOut,
     CountIn,
     CountOut,
     ReferenceIn,
     ReferenceOut,
+    SolarDayOut,
     StationIn,
     StationOut,
 )
@@ -40,6 +44,16 @@ def parse_date(text: str) -> date:
 def _station_out(db: Session, st: Station) -> StationOut:
     n = db.scalar(select(func.count()).select_from(DailyCount).where(DailyCount.station_id == st.id)) or 0
     return StationOut.model_validate({**{c: getattr(st, c) for c in StationIn.model_fields}, "id": st.id, "n_counts": n})
+
+
+def _queue_ai(db: Session, background: BackgroundTasks, station: Station, days: list[date]) -> None:
+    """Analyse the real HMI image for each day that has no finished AI count yet."""
+    if not get_settings().daily_auto_analyze or not days:
+        return
+    done = set(db.scalars(select(SolarDay.date).where(SolarDay.date.in_(days), SolarDay.status == "done")))
+    todo = [d for d in days if d not in done]
+    if todo:
+        background.add_task(process_days, todo, station.longitude)
 
 
 def _get_station(db: Session, station_id: int) -> Station:
@@ -121,9 +135,12 @@ def list_counts(station_id: int, start: date | None = None, end: date | None = N
 
 
 @router.post("/stations/{station_id}/counts", response_model=CountOut, status_code=201)
-def add_count(station_id: int, payload: CountIn, db: Session = Depends(get_db)):
-    """Create or replace the count for ``payload.date``."""
-    return upsert_count(db, _get_station(db, station_id), payload)
+def add_count(station_id: int, payload: CountIn, background: BackgroundTasks, db: Session = Depends(get_db)):
+    """Create or replace the count for ``payload.date``; queues the AI analysis of that day's HMI image."""
+    st = _get_station(db, station_id)
+    row = upsert_count(db, st, payload)
+    _queue_ai(db, background, st, [payload.date])
+    return row
 
 
 @router.delete("/stations/{station_id}/counts/{day}", status_code=204)
@@ -135,7 +152,7 @@ def delete_count(station_id: int, day: date, db: Session = Depends(get_db)):
     db.commit()
 
 
-def import_csv_text(db: Session, station: Station, text: str) -> int:
+def import_csv_text(db: Session, station: Station, text: str) -> list[date]:
     """Import ``date,g,s[,k][,ri][,seeing][,notes]`` rows (header required)."""
     reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")))
     if not reader.fieldnames:
@@ -150,7 +167,7 @@ def import_csv_text(db: Session, station: Station, text: str) -> int:
         raw = (raw or "").strip()
         return cast(raw) if raw else None
 
-    n = 0
+    days: list[date] = []
     for i, row in enumerate(reader, start=2):
         try:
             payload = CountIn(
@@ -165,18 +182,21 @@ def import_csv_text(db: Session, station: Station, text: str) -> int:
         except (ValueError, TypeError) as exc:
             raise ValueError(f"Row {i}: {exc}") from exc
         upsert_count(db, station, payload)
-        n += 1
-    return n
+        days.append(payload.date)
+    return days
 
 
 @router.post("/stations/{station_id}/counts/import")
-async def import_counts(station_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)) -> dict:
+async def import_counts(
+    station_id: int, background: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(get_db)
+) -> dict:
     st = _get_station(db, station_id)
     try:
-        n = import_csv_text(db, st, (await file.read()).decode("utf-8"))
+        days = import_csv_text(db, st, (await file.read()).decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {"imported": n}
+    _queue_ai(db, background, st, days)
+    return {"imported": len(days)}
 
 
 @router.get("/stations/{station_id}/compare", response_model=ComparisonOut)
@@ -197,13 +217,19 @@ def compare_station(
         reference = ref.get_reference(db, source=source)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    rows, summary = compare(counts, reference, st.k_factor, interpolation, start, end)
+    ai = {
+        d.date: AICount(d.groups, d.spots, d.r_ai)
+        for d in db.scalars(select(SolarDay).where(SolarDay.status == "done", SolarDay.r_ai.is_not(None)))
+    }
+    rows, summary = compare(counts, reference, st.k_factor, interpolation, start, end, ai)
     # Days in range the station didn't cover still show the international value.
     if start and end:
         covered = {r.date for r in rows}
         extra = [
             {"date": d, "observed": False, "groups": None, "spots": None, "k": None, "wolf_raw": None, "r_local": None,
-             "r_calibrated": None, "r_international": v, "reference_source": s, "pct_diff_local": None, "pct_diff_calibrated": None}
+             "r_calibrated": None, "r_international": v, "reference_source": s, "pct_diff_local": None, "pct_diff_calibrated": None,
+             "ai_groups": ai[d].groups if d in ai else None, "ai_spots": ai[d].spots if d in ai else None,
+             "r_ai": ai[d].r_ai if d in ai else None, "pct_diff_ai": None}
             for d, (v, s) in reference.items() if start <= d <= end and d not in covered
         ]
         row_dicts = sorted([r.as_dict() for r in rows] + extra, key=lambda r: r["date"])
@@ -238,3 +264,38 @@ def delete_reference(day: date, db: Session = Depends(get_db)):
 @router.post("/reference/refresh")
 def refresh_reference(db: Session = Depends(get_db)) -> dict:
     return ref.sync(db, force=True)
+
+
+@router.get("/solar-days", response_model=list[SolarDayOut])
+def list_solar_days(start: date | None = None, end: date | None = None, db: Session = Depends(get_db)):
+    """AI counts of the real SDO/HMI image per date."""
+    stmt = select(SolarDay).order_by(SolarDay.date)
+    if start:
+        stmt = stmt.where(SolarDay.date >= start)
+    if end:
+        stmt = stmt.where(SolarDay.date <= end)
+    return list(db.scalars(stmt))
+
+
+@router.get("/solar-days/{day}", response_model=SolarDayOut)
+def get_solar_day(day: date, db: Session = Depends(get_db)):
+    row = db.scalars(select(SolarDay).where(SolarDay.date == day)).first()
+    if row is None:
+        raise HTTPException(404, "This day has not been analysed")
+    return row
+
+
+@router.get("/solar-days/{day}/image", response_class=FileResponse)
+def solar_day_image(day: date, db: Session = Depends(get_db)):
+    """Annotated HMI image: spots outlined in red, groups circled and numbered."""
+    row = db.scalars(select(SolarDay).where(SolarDay.date == day)).first()
+    if row is None or not row.image_path:
+        raise HTTPException(404, "No image for this day")
+    return FileResponse(row.image_path, media_type="image/png")
+
+
+@router.post("/solar-days/{day}/analyze", status_code=202)
+def analyze_solar_day(day: date, background: BackgroundTasks, longitude: float | None = None, force: bool = True) -> dict:
+    """(Re)fetch the HMI image for ``day`` and let the AI count g and s, in the background."""
+    background.add_task(process_days, [day], longitude, force)
+    return {"queued": day.isoformat()}

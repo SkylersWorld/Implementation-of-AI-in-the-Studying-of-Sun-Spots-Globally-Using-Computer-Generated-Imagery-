@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -7,7 +5,17 @@ from fastapi.testclient import TestClient
 from backend.calibration import reference as ref
 from backend.main import app
 
-CSV = (Path(__file__).resolve().parent.parent / "data" / "samples" / "tsu_tbilisi_2026.csv").read_bytes()
+CSV = b"""date,g,s,k,ri
+21.08.26,2,5,1.4,112
+2026-08-24,6,28,1.5,91
+2026-09-02,2,3,1.5,52
+2026-09-07,4,10,1.5,97
+2026-09-08,7,10,1.2,98
+2026-09-11,6,7,1.4,101
+2026-09-14,2,3,1.5,105
+2026-09-16,7,15,1.5,114
+2026-09-17,7,10,1.5,118
+"""
 
 
 @pytest.fixture
@@ -18,7 +26,7 @@ def client():
 
 
 def _station(c, **kw):
-    body = {"name": "TSU Observatory", "country": "Georgia", "city": "Tbilisi", "k_factor": 1.5, **kw}
+    body = {"name": "Tbilisi Station", "country": "Georgia", "city": "Tbilisi", "k_factor": 1.5, **kw}
     resp = c.post("/stations", json=body)
     assert resp.status_code == 201, resp.text
     return resp.json()
@@ -27,9 +35,9 @@ def _station(c, **kw):
 def test_station_crud_and_countries(client):
     st = _station(client)
     _station(client, name="Kanzelhöhe", country="Austria", city=None)
-    assert client.post("/stations", json={"name": "TSU Observatory", "country": "Georgia"}).status_code == 409
+    assert client.post("/stations", json={"name": "Tbilisi Station", "country": "Georgia"}).status_code == 409
     assert client.get("/countries").json() == ["Austria", "Georgia"]
-    assert [s["name"] for s in client.get("/stations", params={"country": "Georgia"}).json()] == ["TSU Observatory"]
+    assert [s["name"] for s in client.get("/stations", params={"country": "Georgia"}).json()] == ["Tbilisi Station"]
     assert client.get(f"/stations/{st['id']}").json()["n_counts"] == 0
 
 

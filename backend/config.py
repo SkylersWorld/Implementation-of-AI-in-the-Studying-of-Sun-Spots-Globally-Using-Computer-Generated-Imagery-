@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     silso_enabled: bool = True
     silso_url: str = "https://www.sidc.be/SILSO/DATA/SN_d_tot_V2.0.csv"
     swpc_url: str = "https://services.swpc.noaa.gov/json/solar-cycle/swpc_observed_ssn.json"
+    helioviewer_url: str = "https://api.helioviewer.org/v2/takeScreenshot/"
+    daily_auto_analyze: bool = True
+    daily_image_folder: Path = BASE_DIR / "data" / "daily"
+    daily_analysis_size: int = 2048
+    daily_contrast: float = 0.9
+    daily_umbra_contrast: float = 0.65
+    daily_group_radius_px: int = 6
     mae_window: int = 30
 
     # Alerts

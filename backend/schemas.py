@@ -126,9 +126,14 @@ class ComparisonRowOut(BaseModel):
     reference_source: str | None
     pct_diff_local: float | None
     pct_diff_calibrated: float | None
+    ai_groups: int | None = None
+    ai_spots: int | None = None
+    r_ai: float | None = None
+    pct_diff_ai: float | None = None
 
 
 class ComparisonSummaryOut(BaseModel):
+    calibration_reference: str | None = None
     k_fit: float | None
     k_fit_sigma: float | None
     n_fit: int
@@ -144,6 +149,9 @@ class ComparisonSummaryOut(BaseModel):
     rmse_calibrated: float | None
     mean_pct_diff_local: float | None
     mean_pct_diff_calibrated: float | None
+    mean_r_ai: float | None = None
+    mae_ai: float | None = None
+    mean_pct_diff_ai: float | None = None
     notes: list[str] = []
 
 
@@ -153,3 +161,19 @@ class ComparisonOut(BaseModel):
     interpolation: str
     rows: list[ComparisonRowOut]
     summary: ComparisonSummaryOut
+
+
+class SolarDayOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    date: date_type
+    status: str
+    obs_time: datetime | None
+    source: str | None
+    method: str | None
+    groups: int | None
+    spots: int | None
+    wolf_raw: float | None
+    r_ai: float | None
+    confidence: float | None
+    error: str | None

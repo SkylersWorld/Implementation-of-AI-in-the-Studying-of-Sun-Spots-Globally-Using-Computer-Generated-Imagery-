@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import date, timedelta
+from datetime import date
 
 import httpx
 import pandas as pd
@@ -70,6 +70,14 @@ DRDT_HELP = (
 )
 
 
+def get_image(day: str) -> bytes | None:
+    try:
+        r = httpx.get(f"{API}/solar-days/{day}/image", timeout=15)
+        return r.content if r.is_success else None
+    except httpx.HTTPError:
+        return None
+
+
 def comparison_tab():
     countries = get_json("/countries")
     if countries is None:
@@ -80,22 +88,21 @@ def comparison_tab():
         country = st.selectbox("Country", countries) if countries else None
         stations = get_json("/stations", country=country) if country else []
         station = st.selectbox("Station", stations or [], format_func=lambda s: f"{s['name']} ({s.get('city') or '—'})")
-        source = st.selectbox(
-            "International R source", ["auto", "manual", "silso", "swpc"],
-            help="auto = your manually entered values first, then SILSO, then NOAA SWPC.",
-        )
         method = st.selectbox("Fill missing days", ["linear", "spline", "none"],
                               help="linear: R_d = R_a + (d-a)/(b-a)·(R_b-R_a) between the nearest observed days.")
+        if st.button("Reload data"):
+            st.cache_data.clear()
 
     manage_expanders(station)
     if not station:
-        st.info("No stations yet. Add one below, or run `python -m backend.seed` to load the TSU Tbilisi sample.")
+        st.info("Add your observatory under “Add a station / country”, then submit your daily counts. "
+                "The charts appear once you have data.")
         return
 
-    full = get_json(f"/stations/{station['id']}/compare", source=source, interpolation=method) or {}
+    full = get_json(f"/stations/{station['id']}/compare", interpolation=method) or {}
     rows = full.get("rows", [])
     if not rows:
-        st.info(f"{station['name']} has no daily counts yet. Add some in “Add daily count” or import a CSV below.")
+        st.info(f"{station['name']} has no daily counts yet. Submit one under “Add / edit a daily count” or import a CSV.")
         return
     first, last = date.fromisoformat(rows[0]["date"]), date.fromisoformat(rows[-1]["date"])
 
@@ -104,46 +111,70 @@ def comparison_tab():
     rng = c2.date_input("Date range for chart & statistics", value=(first, last))
     start, end = (rng if isinstance(rng, tuple) and len(rng) == 2 else (first, last))
 
-    sel = get_json(f"/stations/{station['id']}/compare", source=source, interpolation=method,
+    sel = get_json(f"/stations/{station['id']}/compare", interpolation=method,
                    start=day.isoformat(), end=day.isoformat()) or {}
-    data = get_json(f"/stations/{station['id']}/compare", source=source, interpolation=method,
+    data = get_json(f"/stations/{station['id']}/compare", interpolation=method,
                     start=start.isoformat(), end=end.isoformat()) or {}
     summ = full.get("summary", {})
     k_fit = summ.get("k_fit")
+    cal_ref = {"ai": "the AI's count", "international": "international R"}.get(summ.get("calibration_reference"), "—")
 
     st.subheader(f"{station['name']}, {station['country']} — {day:%d %B %Y}")
     row = (sel.get("rows") or [None])[0]
     if row is None or row.get("r_local") is None:
         ref_val = row.get("r_international") if row else None
         st.warning(
-            f"No local count or interpolation for this day (station data covers {first} → {last})."
+            f"No local count or interpolation for this day (your data covers {first} → {last})."
             + (f" International R = {ref_val:.0f}." if ref_val is not None else "")
         )
     else:
         kind = "observed" if row["observed"] else f"{method}-interpolated"
         m = st.columns(5)
-        m[0].metric("Raw W = 10g + s", fmt(row["wolf_raw"], ".0f"),
+        m[0].metric("Your count W = 10g + s", fmt(row["wolf_raw"], ".0f"),
                     help=f"g={row['groups']}, s={row['spots']}" if row["observed"] else "interpolated")
         m[1].metric(f"Local R (k={fmt(row['k'], '.2f')})" if row["observed"] else "Local R", fmt(row["r_local"]),
                     delta=fmt(row["pct_diff_local"], "+.1f", "% vs intl") if row["pct_diff_local"] is not None else None,
                     delta_color="off")
         m[2].metric(f"Calibrated R (k_fit={fmt(k_fit, '.3f')})", fmt(row["r_calibrated"]),
                     delta=fmt(row["pct_diff_calibrated"], "+.1f", "% vs intl") if row["pct_diff_calibrated"] is not None else None,
-                    delta_color="off")
-        m[3].metric("International R", fmt(row["r_international"], ".0f"),
-                    help=f"source: {row['reference_source']}" if row["reference_source"] else "no reference value for this day")
-        has_both = row["r_international"] is not None and row["r_calibrated"] is not None
-        diff = row["r_calibrated"] - row["r_international"] if has_both else None
-        m[4].metric("Calibrated − International", fmt(diff, "+.1f"))
+                    delta_color="off", help=f"k_fit is fitted against {cal_ref}")
+        ai_label = f"AI R (g={row['ai_groups']}, s={row['ai_spots']})" if row.get("r_ai") is not None else "AI R"
+        m[3].metric(ai_label, fmt(row.get("r_ai")),
+                    delta=fmt(row["pct_diff_ai"], "+.1f", "% vs intl") if row.get("pct_diff_ai") is not None else None,
+                    delta_color="off", help="Counted by the AI on the real SDO/HMI image of that day")
+        m[4].metric("International R", fmt(row["r_international"], ".0f"),
+                    help=f"source: {row['reference_source']}" if row["reference_source"] else "not published yet")
         st.caption(
-            f"This day is **{kind}**. International source: **{row['reference_source'] or 'none'}**. "
-            "% difference = (R − R_intl) / R_intl × 100. "
-            "Calibrated R uses k_fit = Σ(W·R_intl)/Σ(W²), fitted by least squares on every observed day "
-            f"that has an international value (n = {summ.get('n_fit', 0)}"
-            + (f", σ_k = {summ['k_fit_sigma']:.3f}" if summ.get("k_fit_sigma") else "") + ")."
+            f"This day is **{kind}**. % difference = (R − R_intl) / R_intl × 100. "
+            f"Calibrated R = k_fit·W, with k_fit = Σ(W·R_ref)/Σ(W²) fitted against {cal_ref} on your observed days "
+            f"(n = {summ.get('n_fit', 0)}" + (f", σ_k = {summ['k_fit_sigma']:.3f}" if summ.get("k_fit_sigma") else "") + "). "
+            f"International R: SILSO, or NOAA SWPC when SILSO is unreachable (this day: **{row['reference_source'] or 'n/a'}**)."
         )
         for note in summ.get("notes", []):
             st.caption(f"⚠️ {note}")
+
+    sun = get_json(f"/solar-days/{day.isoformat()}")
+    with st.container(border=True):
+        st.markdown(f"**The Sun on {day:%d %B %Y} — AI count on the real SDO/HMI image**")
+        img = get_image(day.isoformat()) if sun and sun.get("status") == "done" else None
+        if img:
+            ci, cm = st.columns([2, 1])
+            ci.image(img, width="stretch")
+            cm.metric("AI groups g", sun["groups"])
+            cm.metric("AI spots s", sun["spots"])
+            cm.metric("AI R = 1.146·(10g+s)", fmt(sun["r_ai"]))
+            obs = pd.to_datetime(sun["obs_time"]).strftime("%Y-%m-%d %H:%M UTC") if sun.get("obs_time") else "?"
+            cm.caption(f"{sun['source']}, {obs}. Method: {sun['method']}. Red = detected spots, yellow = groups (G#: spots).")
+        elif sun and sun.get("status") == "pending":
+            st.info("The AI is downloading and analysing this day's image… press “Reload data” in a few seconds.")
+        else:
+            if sun and sun.get("status") == "failed":
+                st.warning(f"Image analysis failed: {sun.get('error')}")
+            else:
+                st.caption("This day hasn't been analysed yet (it runs automatically for every day you submit).")
+            if st.button("Analyse this day now"):
+                ok, res = send("POST", f"/solar-days/{day.isoformat()}/analyze", params={"longitude": station.get("longitude")})
+                (st.info if ok else st.error)("Queued — press “Reload data” in ~30 s." if ok else res)
 
     df = pd.DataFrame(data.get("rows", []))
     if df.empty:
@@ -155,8 +186,11 @@ def comparison_tab():
     fig.add_trace(go.Scatter(x=df.date, y=df.r_local, mode="lines", name="Local R (k)", line=dict(color="orange")))
     fig.add_trace(go.Scatter(x=df.date, y=df.r_calibrated, mode="lines", name="Calibrated R (k_fit)",
                              line=dict(color="#2ecc71", dash="dash")))
+    if "r_ai" in df and df.r_ai.notna().any():
+        fig.add_trace(go.Scatter(x=df.date, y=df.r_ai, mode="markers", name="AI R (HMI image)",
+                                 marker=dict(symbol="diamond", size=10, color="#9b59b6")))
     obs_df = df[df.observed]
-    fig.add_trace(go.Scatter(x=obs_df.date, y=obs_df.r_local, mode="markers", name="Observed day",
+    fig.add_trace(go.Scatter(x=obs_df.date, y=obs_df.r_local, mode="markers", name="Your observed day",
                              marker=dict(size=9, color="orange", line=dict(width=1, color="black"))))
     fig.add_vline(x=pd.Timestamp(day), line=dict(color="grey", dash="dot"))
     fig.update_layout(height=400, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="Sunspot number R",
@@ -164,22 +198,26 @@ def comparison_tab():
     st.plotly_chart(fig, width="stretch")
 
     s = data.get("summary", {})
-    st.markdown("**Statistics over the selected range (observed days only)**")
+    st.markdown("**Statistics over the selected range (your observed days only)**")
     a = st.columns(4)
     a[0].metric("Days observed / filled", f"{s.get('n_observed', 0)} / {s.get('n_interpolated', 0)}")
     a[1].metric("Mean local R", fmt(s.get("mean_r_local"), ".2f"))
     a[2].metric("σ local R", fmt(s.get("std_r_local"), ".2f"), help="Population standard deviation")
     a[3].metric("Mean international R", fmt(s.get("mean_r_international"), ".2f"))
-    b = st.columns(4)
-    b[0].metric("MAE local", fmt(s.get("mae_local"), ".2f"), help="Mean absolute error of local R vs international R")
-    b[1].metric("MAE calibrated", fmt(s.get("mae_calibrated"), ".2f"), help="Mean absolute error of calibrated R vs international R")
-    b[2].metric("Mean % diff local", fmt(s.get("mean_pct_diff_local"), "+.1f", "%"))
-    b[3].metric("Mean % diff calibrated", fmt(s.get("mean_pct_diff_calibrated"), "+.1f", "%"))
+    b = st.columns(3)
+    b[0].metric("MAE local", fmt(s.get("mae_local"), ".2f"), help="Mean absolute error vs international R")
+    b[1].metric("MAE calibrated", fmt(s.get("mae_calibrated"), ".2f"), help="Mean absolute error vs international R")
+    b[2].metric("MAE AI", fmt(s.get("mae_ai"), ".2f"), help="Mean absolute error vs international R")
+    c = st.columns(3)
+    c[0].metric("Mean % diff local", fmt(s.get("mean_pct_diff_local"), "+.1f", "%"))
+    c[1].metric("Mean % diff calibrated", fmt(s.get("mean_pct_diff_calibrated"), "+.1f", "%"))
+    c[2].metric("Mean % diff AI", fmt(s.get("mean_pct_diff_ai"), "+.1f", "%"))
 
     show = df.assign(date=df.date.dt.date).rename(columns={
         "groups": "g", "spots": "s", "wolf_raw": "W", "r_local": "R local", "r_calibrated": "R calibrated",
+        "ai_groups": "AI g", "ai_spots": "AI s", "r_ai": "R AI",
         "r_international": "R intl", "reference_source": "intl source", "pct_diff_local": "% diff local",
-        "pct_diff_calibrated": "% diff calibrated"})
+        "pct_diff_calibrated": "% diff calibrated", "pct_diff_ai": "% diff AI"})
     with st.expander("Daily table", expanded=False):
         st.dataframe(show.round(2), width="stretch", hide_index=True)
         st.download_button("Download CSV", show.to_csv(index=False), f"{station['name']}_comparison.csv", "text/csv")
@@ -189,46 +227,39 @@ def manage_expanders(station):
     if station:
         with st.expander("Add / edit a daily count"):
             with st.form("count"):
-                c = st.columns(5)
+                c = st.columns(4)
                 d = c[0].date_input("Date", value=date.today(), key="count_date")
                 g = c[1].number_input("Groups g", 0, 200, 0)
                 s = c[2].number_input("Spots s", 0, 2000, 0)
-                k = c[3].number_input("k (blank = station default)", 0.0, 10.0, float(station["k_factor"]), 0.05)
-                ri = c[4].number_input("International R (optional, 0 = skip)", 0.0, 1000.0, 0.0)
+                k = c[3].number_input("k (your coefficient)", 0.05, 10.0, float(station["k_factor"]), 0.05)
                 notes = st.text_input("Notes")
-                if st.form_submit_button("Save count"):
-                    body = {"date": d.isoformat(), "groups": int(g), "spots": int(s), "k": k or None,
-                            "notes": notes or None, "international_r": ri or None}
+                if st.form_submit_button("Submit"):
+                    body = {"date": d.isoformat(), "groups": int(g), "spots": int(s), "k": k, "notes": notes or None}
                     ok, res = send("POST", f"/stations/{station['id']}/counts", json=body)
-                    (st.success if ok else st.error)("Saved." if ok else res)
+                    (st.success if ok else st.error)(
+                        "Saved. The AI is now analysing the real HMI image for that day (~30 s)." if ok else res)
         with st.expander("Import CSV"):
-            st.caption("Columns: `date,g,s` plus optional `k,ri,seeing,notes`. Dates as YYYY-MM-DD or DD.MM.YY. "
-                       "`ri` is stored as a manual international value.")
+            st.caption("Columns: `date,g,s` plus optional `k,seeing,notes`. Dates as YYYY-MM-DD or DD.MM.YY.")
             up = st.file_uploader("CSV file", type="csv")
             if up is not None and st.button("Import"):
                 ok, res = send("POST", f"/stations/{station['id']}/counts/import",
                                files={"file": (up.name, up.getvalue(), "text/csv")})
-                (st.success if ok else st.error)(f"Imported {res['imported']} rows." if ok else res)
-    with st.expander("International R: manual values & refresh"):
-        c = st.columns([1, 1, 1, 2])
-        d = c[0].date_input("Date", value=date.today() - timedelta(days=1), key="ref_date")
-        v = c[1].number_input("R_intl", 0.0, 1000.0, 0.0, key="ref_val")
-        if c[2].button("Save manual value"):
-            ok, res = send("PUT", f"/reference/{d.isoformat()}", json={"value": v})
-            (st.success if ok else st.error)("Saved." if ok else res)
-        if c[3].button("Refresh SILSO + NOAA now"):
-            ok, res = send("POST", "/reference/refresh")
-            (st.info if ok else st.error)(res)
-        st.caption("Manual values override SILSO, which overrides NOAA SWPC. Remote values are cached in the database.")
+                (st.success if ok else st.error)(
+                    f"Imported {res['imported']} rows; the AI analyses each day in the background." if ok else res)
     with st.expander("Add a station / country"):
         with st.form("station"):
-            c = st.columns(4)
-            name = c[0].text_input("Station name")
+            c = st.columns(3)
+            name = c[0].text_input("Observatory name")
             country = c[1].text_input("Country")
             city = c[2].text_input("City")
-            kf = c[3].number_input("Default k", 0.05, 10.0, 1.0, 0.05)
+            c = st.columns(3)
+            lat = c[0].number_input("Latitude", -90.0, 90.0, 0.0, format="%.4f")
+            lon = c[1].number_input("Longitude (east +)", -180.0, 180.0, 0.0, format="%.4f",
+                                    help="Used to pick the HMI image nearest your local noon")
+            kf = c[2].number_input("Default k", 0.05, 10.0, 1.0, 0.05)
             if st.form_submit_button("Create station"):
-                ok, res = send("POST", "/stations", json={"name": name, "country": country, "city": city or None, "k_factor": kf})
+                body = {"name": name, "country": country, "city": city or None, "latitude": lat, "longitude": lon, "k_factor": kf}
+                ok, res = send("POST", "/stations", json=body)
                 (st.success if ok else st.error)("Created — pick it in the sidebar." if ok else res)
 
 

@@ -40,7 +40,7 @@ class Observation(Base):
 
 
 class Station(Base):
-    """A ground observing station (e.g. TSU Observatory, Tbilisi, Georgia)."""
+    """A ground observing station run by a user (name, country, location, default k)."""
 
     __tablename__ = "stations"
 
@@ -71,6 +71,26 @@ class DailyCount(Base):
     notes: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     station: Mapped[Station] = relationship(back_populates="counts")
+
+
+class SolarDay(Base):
+    """The AI's count of the real SDO/HMI full-disk image for one date (shared by all stations)."""
+
+    __tablename__ = "solar_days"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[date] = mapped_column(Date, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending | done | failed
+    obs_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    method: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    groups: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    spots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    wolf_raw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    r_ai: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    image_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class ReferenceSN(Base):

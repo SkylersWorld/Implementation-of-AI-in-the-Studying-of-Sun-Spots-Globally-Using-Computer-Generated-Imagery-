@@ -4,8 +4,10 @@ For a station day with g groups and s spots:
 
     W        = 10 g + s                    raw Wolf number
     R_local  = k_obs * W                   observer's own coefficient (as recorded)
-    R_cal    = k_fit * W                   k_fit = sum(Ri*W) / sum(W^2) (least squares through origin)
-    %diff    = (R - Ri) / Ri * 100
+    R_AI     = AI count of the real SDO/HMI image that day
+    R_cal    = k_fit * W                   k_fit = sum(R_AI*W) / sum(W^2) (least squares through origin;
+                                           falls back to the international R when no AI counts exist)
+    %diff    = (R - Ri) / Ri * 100         Ri = international sunspot number
 
 Missing days are filled by linear interpolation between the neighbouring observed
 days a < d < b:  R_d = R_a + (d - a) / (b - a) * (R_b - R_a)   (or a cubic spline).
@@ -33,6 +35,13 @@ class Count:
 
 
 @dataclass
+class AICount:
+    groups: int
+    spots: int
+    r_ai: float
+
+
+@dataclass
 class ComparisonRow:
     date: date
     observed: bool
@@ -46,6 +55,10 @@ class ComparisonRow:
     reference_source: str | None
     pct_diff_local: float | None
     pct_diff_calibrated: float | None
+    ai_groups: int | None = None
+    ai_spots: int | None = None
+    r_ai: float | None = None
+    pct_diff_ai: float | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -53,6 +66,7 @@ class ComparisonRow:
 
 @dataclass
 class ComparisonSummary:
+    calibration_reference: str | None
     k_fit: float | None
     k_fit_sigma: float | None
     n_fit: int
@@ -68,6 +82,9 @@ class ComparisonSummary:
     rmse_calibrated: float | None
     mean_pct_diff_local: float | None
     mean_pct_diff_calibrated: float | None
+    mean_r_ai: float | None = None
+    mae_ai: float | None = None
+    mean_pct_diff_ai: float | None = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -139,16 +156,21 @@ def compare(
     method: str = "linear",
     start: date | None = None,
     end: date | None = None,
+    ai: dict[date, AICount] | None = None,
 ) -> tuple[list[ComparisonRow], ComparisonSummary]:
-    """Compare a station's daily counts with the international sunspot number.
+    """Compare a station's daily counts with the AI count and the international sunspot number.
 
-    ``k_fit`` is fitted on *all* supplied observed days that have a reference value,
-    then applied to every row; summary statistics cover the observed days in range.
+    ``k_fit`` is fitted on *all* supplied observed days that have an AI count (or, if there are
+    none, an international value), then applied to every row; summary statistics cover the
+    observed days in range.
     """
+    ai = ai or {}
     by_day = {c.date: c for c in counts}
     w_obs = {d: wolf_raw(c.groups, c.spots) for d, c in by_day.items()}
     r_obs = {d: (c.k if c.k is not None else station_k) * w_obs[d] for d, c in by_day.items()}
-    k_fit, k_sigma, n_fit = fit_k((w_obs[d], reference[d][0]) for d in w_obs if d in reference)
+    calibration_reference = "ai" if any(d in ai for d in w_obs) else ("international" if any(d in reference for d in w_obs) else None)
+    target = {d: a.r_ai for d, a in ai.items()} if calibration_reference == "ai" else {d: v for d, (v, _) in reference.items()}
+    k_fit, k_sigma, n_fit = fit_k((w_obs[d], target[d]) for d in w_obs if d in target)
 
     r_series = interpolate_daily(r_obs, method, start, end)
     w_series = interpolate_daily(w_obs, method, start, end)
@@ -160,6 +182,7 @@ def compare(
         c = by_day.get(d)
         ref_val, ref_src = reference.get(d, (None, None))
         r_cal = k_fit * w if k_fit is not None else None
+        a = ai.get(d)
         rows.append(
             ComparisonRow(
                 date=d,
@@ -174,6 +197,10 @@ def compare(
                 reference_source=ref_src,
                 pct_diff_local=pct_diff(r_local, ref_val),
                 pct_diff_calibrated=pct_diff(r_cal, ref_val),
+                ai_groups=a.groups if a else None,
+                ai_spots=a.spots if a else None,
+                r_ai=a.r_ai if a else None,
+                pct_diff_ai=pct_diff(a.r_ai if a else None, ref_val),
             )
         )
 
@@ -182,10 +209,16 @@ def compare(
     local_err = [r.r_local - r.r_international for r in matched]
     cal_err = [r.r_calibrated - r.r_international for r in matched if r.r_calibrated is not None]
     local_vals = [r.r_local for r in obs_rows]
+    ai_rows = [r for r in obs_rows if r.r_ai is not None]
+    ai_err = [r.r_ai - r.r_international for r in ai_rows if r.r_international is not None]
     notes = []
     if n_fit < 3:
-        notes.append("k_fit uses fewer than 3 days with an international value; treat it as provisional.")
+        notes.append(f"k_fit is based on {n_fit} day(s); treat it as provisional until you have at least 3.")
     summary = ComparisonSummary(
+        calibration_reference=calibration_reference,
+        mean_r_ai=_mean([r.r_ai for r in ai_rows]),
+        mae_ai=_mean([abs(e) for e in ai_err]),
+        mean_pct_diff_ai=_mean([r.pct_diff_ai for r in ai_rows if r.pct_diff_ai is not None]),
         k_fit=k_fit,
         k_fit_sigma=k_sigma,
         n_fit=n_fit,

@@ -10,6 +10,8 @@ os.environ.update(
         "PROCESSED_FOLDER": str(_TMP / "processed"),
         "MODEL_WEIGHTS": str(_TMP / "no-weights.pt"),
         "SILSO_ENABLED": "false",
+        "DAILY_AUTO_ANALYZE": "false",
+        "DAILY_IMAGE_FOLDER": str(_TMP / "daily"),
         "SCHEDULER_ENABLED": "false",
         "MODEL_INPUT_SIZE": "256",
         "SLACK_WEBHOOK_URL": "",
