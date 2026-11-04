@@ -12,8 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.alerts.rules import Snapshot, cme_risk, drdt_per_hour
+from backend.calibration.reference import get_reference
 from backend.calibration.seeing import measure_seeing
-from backend.calibration.silso import fetch_silso_daily, rolling_mae
+from backend.calibration.silso import rolling_mae
 from backend.config import get_settings
 from backend.database import Observation, get_db, init_db
 from backend.hardware.mount import MountClient, sun_radec
@@ -29,6 +30,7 @@ from backend.schemas import (
     SeeingIn,
     SeeingOut,
 )
+from backend.stations import router as stations_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("solar-ai")
@@ -47,7 +49,8 @@ async def lifespan(app: FastAPI):
         scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title=get_settings().app_name, version="1.0.0", lifespan=lifespan)
+app = FastAPI(title=get_settings().app_name, version="1.1.0", lifespan=lifespan)
+app.include_router(stations_router)
 
 
 def _aware(t: datetime) -> datetime:
@@ -165,8 +168,8 @@ def metrics(db: Session = Depends(get_db)):
     snap = lambda o: Snapshot(_aware(o.timestamp), o.r_corrected, o.delta_class, o.groups, o.spots)  # noqa: E731
     rate = drdt_per_hour(snap(rows[-2]), snap(latest)) if len(rows) > 1 else None
     mae = latest.mae
-    if mae is None and get_settings().silso_enabled:
-        reference = fetch_silso_daily()
+    if mae is None:
+        reference = {d: v for d, (v, _) in get_reference(db).items()}
         mae = rolling_mae([(_aware(o.timestamp), o.r_corrected) for o in rows], reference) if reference else None
     return MetricsOut(
         count=len(rows),
@@ -178,10 +181,10 @@ def metrics(db: Session = Depends(get_db)):
 
 
 @app.get("/metrics/silso")
-def silso_reference(days: int = Query(90, ge=1, le=3650)) -> list[dict]:
-    data = fetch_silso_daily()
-    cutoff = date.today() - timedelta(days=days)
-    return [{"date": d.isoformat(), "sn": v} for d, v in sorted(data.items()) if d >= cutoff]
+def silso_reference(days: int = Query(90, ge=1, le=3650), db: Session = Depends(get_db)) -> list[dict]:
+    """International daily R (best available: manual > SILSO > NOAA SWPC) for the last ``days``."""
+    data = get_reference(db, start=date.today() - timedelta(days=days))
+    return [{"date": d.isoformat(), "sn": v, "source": s} for d, (v, s) in sorted(data.items())]
 
 
 @app.post("/hardware/sync", response_model=MountSyncOut)

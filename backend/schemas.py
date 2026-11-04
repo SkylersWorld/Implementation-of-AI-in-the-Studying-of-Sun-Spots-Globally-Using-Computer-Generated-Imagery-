@@ -1,6 +1,7 @@
 """Pydantic request/response schemas."""
 from __future__ import annotations
 
+from datetime import date as date_type
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -61,3 +62,118 @@ class MetricsOut(BaseModel):
     rolling_mae: float | None
     drdt_per_hour: float | None
     cme_risk: str
+
+
+class StationIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    country: str = Field(..., min_length=1, max_length=64)
+    city: str | None = None
+    latitude: float | None = Field(None, ge=-90, le=90)
+    longitude: float | None = Field(None, ge=-180, le=180)
+    k_factor: float = Field(1.0, gt=0)
+
+
+class StationOut(StationIn):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    n_counts: int = 0
+
+
+class CountIn(BaseModel):
+    date: date_type
+    groups: int = Field(..., ge=0)
+    spots: int = Field(..., ge=0)
+    k: float | None = Field(None, gt=0, description="Observer coefficient; defaults to the station k_factor")
+    seeing_arcsec: float | None = Field(None, ge=0)
+    notes: str | None = None
+    international_r: float | None = Field(None, ge=0, description="Optional international R to store as a manual reference")
+
+
+class CountOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    station_id: int
+    date: date_type
+    groups: int
+    spots: int
+    k: float | None
+    seeing_arcsec: float | None
+    notes: str | None
+
+
+class ReferenceIn(BaseModel):
+    value: float = Field(..., ge=0)
+
+
+class ReferenceOut(BaseModel):
+    date: date_type
+    value: float
+    source: str
+
+
+class ComparisonRowOut(BaseModel):
+    date: date_type
+    observed: bool
+    groups: int | None
+    spots: int | None
+    k: float | None
+    wolf_raw: float | None
+    r_local: float | None
+    r_calibrated: float | None
+    r_international: float | None
+    reference_source: str | None
+    pct_diff_local: float | None
+    pct_diff_calibrated: float | None
+    ai_groups: int | None = None
+    ai_spots: int | None = None
+    r_ai: float | None = None
+    pct_diff_ai: float | None = None
+
+
+class ComparisonSummaryOut(BaseModel):
+    calibration_reference: str | None = None
+    k_fit: float | None
+    k_fit_sigma: float | None
+    n_fit: int
+    n_observed: int
+    n_interpolated: int
+    mean_r_local: float | None
+    std_r_local: float | None
+    mean_r_calibrated: float | None
+    mean_r_international: float | None
+    mae_local: float | None
+    mae_calibrated: float | None
+    rmse_local: float | None
+    rmse_calibrated: float | None
+    mean_pct_diff_local: float | None
+    mean_pct_diff_calibrated: float | None
+    mean_r_ai: float | None = None
+    mae_ai: float | None = None
+    mean_pct_diff_ai: float | None = None
+    notes: list[str] = []
+
+
+class ComparisonOut(BaseModel):
+    station: StationOut
+    reference_source: str
+    interpolation: str
+    rows: list[ComparisonRowOut]
+    summary: ComparisonSummaryOut
+
+
+class SolarDayOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    date: date_type
+    status: str
+    obs_time: datetime | None
+    source: str | None
+    method: str | None
+    groups: int | None
+    spots: int | None
+    wolf_raw: float | None
+    r_ai: float | None
+    confidence: float | None
+    error: str | None
